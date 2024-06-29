@@ -726,12 +726,13 @@ public sealed class MacroEditor : Window, IDisposable
         ushort? newRecipe = null;
         {
             var recipe = RecipeData.Recipe;
-            using var fontHandle = AxisFont.Lock();
+            using var lockedFontHandle = AxisFont.Available ? AxisFont.Lock() : null;
+            var fontHandle = lockedFontHandle?.ImFont ?? ImGui.GetFont();
             if (ImGuiUtils.SearchableCombo(
                 "combo",
                 ref recipe,
                 LuminaSheets.RecipeSheet.Where(r => r.RecipeLevelTable.Row != 0 && r.ItemResult.Row != 0),
-                fontHandle.ImFont,
+                fontHandle,
                 ImGui.GetContentRegionAvail().X - rightSideWidth,
                 r => r.ItemResult.Value!.Name.ToDalamudString().ToString(),
                 r => r.RowId.ToString(),
@@ -744,7 +745,7 @@ public sealed class MacroEditor : Window, IDisposable
                     var textLevelSize = ImGui.CalcTextSize(textLevel);
                     ImGui.SameLine();
 
-                    var imageSize = fontHandle.ImFont.FontSize;
+                    var imageSize = fontHandle.FontSize;
                     ImGuiUtils.AlignRight(
                         imageSize + 5 +
                         textLevelSize.X,
@@ -758,7 +759,7 @@ public sealed class MacroEditor : Window, IDisposable
                     ImGui.SetCursorPosY(ImGui.GetCursorPosY() + ImGui.GetStyle().FramePadding.Y / 2);
                     ImGui.Image(Service.IconManager.GetIcon(classJob.GetIconId()).ImGuiHandle, new Vector2(imageSize), uv0, uv1);
                     ImGui.SameLine(0, 5);
-                    ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (fontHandle.ImFont.FontSize - textLevelSize.Y) / 2);
+                    ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (fontHandle.FontSize - textLevelSize.Y) / 2);
                     ImGui.TextUnformatted(textLevel);
                 }))
             {
@@ -952,7 +953,7 @@ public sealed class MacroEditor : Window, IDisposable
                 {
                     var actionBase = actions[i].Base();
                     var canUse = actionBase.CanUse(sim);
-                    if (ImGui.ImageButton(actions[i].GetIcon(RecipeData!.ClassJob).ImGuiHandle, new(imageSize), default, Vector2.One, 0, default, !canUse ? new(1, 1, 1, ImGui.GetStyle().DisabledAlpha) : Vector4.One))
+                    if (ImGui.ImageButton(actions[i].GetIcon(RecipeData!.ClassJob).ImGuiHandle, new(imageSize), default, Vector2.One, 0, default, !canUse ? new(1, 1, 1, ImGui.GetStyle().DisabledAlpha) : Vector4.One) && !SolverRunning)
                         AddStep(actions[i]);
                     if (!canUse &&
                         (CharacterStats.Level < actionBase.Level ||
@@ -1111,68 +1112,6 @@ public sealed class MacroEditor : Window, IDisposable
         }
     }
 
-    private readonly record struct BarData(string Name, Vector4 Color, SimulatedMacro.Reliablity.Param? Reliability, float Value, float Max, string? Caption, Condition? Condition);
-    private void DrawBars(IEnumerable<BarData> bars)
-    {
-        var spacing = ImGui.GetStyle().ItemSpacing.X;
-        var totalSize = ImGui.GetContentRegionAvail().X;
-        totalSize -= 2 * spacing;
-        var textSize = bars.Max(b =>
-        {
-            if (b.Caption is { } caption)
-                return ImGui.CalcTextSize(caption).X;
-            // max (sp/2) "/" (sp/2) max
-            return Math.Max(ImGui.CalcTextSize($"{b.Value:0}").X, ImGui.CalcTextSize($"{b.Max:0}").X) * 2
-                + spacing
-                + ImGui.CalcTextSize("/").X;
-        });
-        var maxSize = (textSize - 2 * spacing - ImGui.CalcTextSize("/").X) / 2;
-        var barSize = totalSize - textSize - spacing;
-        foreach (var bar in bars)
-        {
-            using var panel = ImRaii2.GroupPanel(bar.Name, totalSize, out _);
-            if (bar.Condition is { } condition)
-            {
-                
-            }
-            else
-            {
-                var pos = ImGui.GetCursorPos();
-                using (var color = ImRaii.PushColor(ImGuiCol.PlotHistogram, bar.Color))
-                    ImGui.ProgressBar(Math.Clamp(bar.Value / bar.Max, 0, 1), new(barSize, ImGui.GetFrameHeight()), string.Empty);
-                if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenOverlapped))
-                {
-                    if (bar.Reliability is { } reliability)
-                    {
-                        if (reliability.GetViolinData(bar.Max, (int)(barSize / 5), 0.02) is { } violinData)
-                        {
-                            ImGui.SetCursorPos(pos);
-                            ImGuiUtils.ViolinPlot(violinData, new(barSize, ImGui.GetFrameHeight()));
-                            if (ImGui.IsItemHovered())
-                                ImGuiUtils.Tooltip(
-                                    $"Min: {reliability.Min}\n" +
-                                    $"Med: {reliability.Median:0.##}\n" +
-                                    $"Avg: {reliability.Average:0.##}\n" +
-                                    $"Max: {reliability.Max}");
-                        }
-                    }
-                }
-                ImGui.SameLine(0, spacing);
-                ImGui.AlignTextToFramePadding();
-                if (bar.Caption is { } caption)
-                    ImGuiUtils.TextRight(caption, textSize);
-                else
-                {
-                    ImGuiUtils.TextRight($"{bar.Value:0}", maxSize);
-                    ImGui.SameLine(0, spacing / 2);
-                    ImGui.TextUnformatted("/");
-                    ImGui.SameLine(0, spacing / 2);
-                    ImGuiUtils.TextRight($"{bar.Max:0}", maxSize);
-                }
-            }
-        }
-    }
-
     private void DrawMacro()
     {
         var spacing = ImGui.GetStyle().ItemSpacing.X;
@@ -1222,23 +1161,26 @@ public sealed class MacroEditor : Window, IDisposable
                 if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                     ImGuiUtils.Tooltip($"{action.GetName(RecipeData!.ClassJob)}\n{actionBase.GetTooltip(CreateSim(lastState), true)}");
 
-                using var _padding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-                using (var _source = ImRaii.DragDropSource())
+                if (!SolverRunning)
                 {
-                    if (_source)
+                    using var _padding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+                    using (var _source = ImRaii.DragDropSource())
                     {
-                        ImGuiExtras.SetDragDropPayload("macroAction", i);
-                        ImGui.ImageButton(action.GetIcon(RecipeData!.ClassJob).ImGuiHandle, new(imageSize));
+                        if (_source)
+                        {
+                            ImGuiExtras.SetDragDropPayload("macroAction", i);
+                            ImGui.ImageButton(action.GetIcon(RecipeData!.ClassJob).ImGuiHandle, new(imageSize));
+                        }
                     }
-                }
-                using (var _target = ImRaii.DragDropTarget())
-                {
-                    if (_target)
+                    using (var _target = ImRaii.DragDropTarget())
                     {
-                        if (ImGuiExtras.AcceptDragDropPayload("macroAction", out int j))
-                            Macro.Move(j, i);
-                        else if (ImGuiExtras.AcceptDragDropPayload("macroActionInsert", out ActionType newAction))
-                            Macro.Insert(i, newAction);
+                        if (_target)
+                        {
+                            if (ImGuiExtras.AcceptDragDropPayload("macroAction", out int j))
+                                Macro.Move(j, i);
+                            else if (ImGuiExtras.AcceptDragDropPayload("macroActionInsert", out ActionType newAction))
+                                Macro.Insert(i, newAction);
+                        }
                     }
                 }
                 lastState = state;
@@ -1300,9 +1242,6 @@ public sealed class MacroEditor : Window, IDisposable
             {
                 using var _disabled = ImRaii.Disabled();
                 ImGui.Button("Stopping", new(halfWidth, height));
-                if (ImGui.IsItemHovered())
-                    ImGuiUtils.Tooltip("This might could a while, sorry! Please report " +
-                                     "if this takes longer than a second.");
             }
             else
             {
@@ -1314,10 +1253,6 @@ public sealed class MacroEditor : Window, IDisposable
         {
             if (ImGui.Button(SolverStartStepCount.HasValue ? "Regenerate" : "Generate", new(halfWidth, height)))
                 CalculateBestMacro();
-            if (ImGui.IsItemHovered())
-                ImGuiUtils.Tooltip("Suggest a way to finish the crafting recipe. " +
-                                 "Results aren't perfect, and levels of success " +
-                                 "can vary wildly depending on the solver's settings.");
         }
         ImGui.SameLine();
         if (ImGuiUtils.IconButtonSquare(FontAwesomeIcon.Paste))
